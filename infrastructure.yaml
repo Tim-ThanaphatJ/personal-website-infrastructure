@@ -1,0 +1,180 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: >
+  Best-practice static website stack:
+  - Uses an existing S3 bucket
+  - CloudFront + OAC
+  - Route 53 records
+  - Uses ACM certificate ARN (in us-east-1)
+  - Cost-allocation tags
+
+Parameters:
+  DomainName:
+    Type: String
+    Default: thanaphatj.me
+    Description: Domain name
+
+  HostedZoneId:
+    Type: String
+    Default:
+    Description: Route 53 Hosted Zone ID for the DomainName.
+
+  WebsiteBucketName:
+    Type: String
+    Default: thanaphatj.me
+    Description: >
+      Existing S3 bucket name for the website content.
+
+  AcmCertificateArn:
+    Type: String
+    Default:
+    Description: ARN of an ACM certificate to be used by CloudFront.
+
+  TagProject:
+    Type: String
+    Default: personal-website
+    Description: Project name for cost allocation.
+
+  TagEnvironment:
+    Type: String
+    Default: prod
+    Description: Environment.
+
+  TagCostCenter:
+    Type: String
+    Default: personal
+    Description: Cost center or billing group.
+
+  TagOwner:
+    Type: String
+    Default: Thanaphat Jiamcharoendet
+    Description: Project owner.
+
+Mappings:
+  CloudFrontRegionMap:
+    Global:
+      CloudFrontHostedZoneId: "Z2FDTNDATAQYW2" # CloudFront's global hosted zone ID
+
+Resources:
+  ############################################################
+  # Origin Access Control (OAC) for CloudFront -> S3
+  ############################################################
+  WebsiteOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: !Sub "${AWS::StackName}-${DomainName}-oac"
+        Description: Origin access control for S3 website bucket
+        SigningProtocol: sigv4
+        SigningBehavior: always
+        OriginAccessControlOriginType: s3
+
+  ############################################################
+  # CloudFront Distribution (global service)
+  ############################################################
+  WebsiteDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: !Sub "Static website for ${DomainName}"
+        DefaultRootObject: index.html
+        Aliases:
+          - !Ref DomainName
+          - !Sub "www.${DomainName}"
+        Origins:
+          - Id: S3Origin
+            # Use existing bucket as origin (REST endpoint, not website endpoint)
+            DomainName: !Sub "${WebsiteBucketName}.s3.${AWS::Region}.amazonaws.com"
+            S3OriginConfig: {}
+            OriginAccessControlId: !Ref WebsiteOAC
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https
+          AllowedMethods:
+            - GET
+            - HEAD
+          CachedMethods:
+            - GET
+            - HEAD
+          Compress: true
+          ForwardedValues:
+            QueryString: false
+        PriceClass: PriceClass_100
+        ViewerCertificate:
+          AcmCertificateArn: !Ref AcmCertificateArn
+          SslSupportMethod: sni-only
+          MinimumProtocolVersion: TLSv1.2_2021
+      Tags:
+        - Key: Project
+          Value: !Ref TagProject
+        - Key: Environment
+          Value: !Ref TagEnvironment
+        - Key: Owner
+          Value: !Ref TagOwner
+        - Key: ManagedBy
+          Value: cloudformation
+        - Key: CostCenter
+          Value: !Ref TagCostCenter
+
+  ############################################################
+  # Bucket Policy – allow only CloudFront (via OAC) to read
+  # (applied to existing bucket)
+  ############################################################
+  WebsiteBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref WebsiteBucketName
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowCloudFrontReadAccess
+            Effect: Allow
+            Principal:
+              Service: cloudfront.amazonaws.com
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${WebsiteBucketName}/*"
+            Condition:
+              StringEquals:
+                AWS:SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${WebsiteDistribution}"
+
+  ############################################################
+  # Route 53 A records -> CloudFront
+  ############################################################
+  RootARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Ref DomainName
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt WebsiteDistribution.DomainName
+        HostedZoneId: !FindInMap [CloudFrontRegionMap, Global, CloudFrontHostedZoneId]
+        EvaluateTargetHealth: false
+
+  WwwARecord:
+    Type: AWS::Route53::RecordSet
+    Properties:
+      HostedZoneId: !Ref HostedZoneId
+      Name: !Sub "www.${DomainName}"
+      Type: A
+      AliasTarget:
+        DNSName: !GetAtt WebsiteDistribution.DomainName
+        HostedZoneId: !FindInMap [CloudFrontRegionMap, Global, CloudFrontHostedZoneId]
+        EvaluateTargetHealth: false
+
+Outputs:
+  WebsiteBucketNameOutput:
+    Description: Name of the existing S3 website bucket
+    Value: !Ref WebsiteBucketName
+
+  WebsiteBucketArnOutput:
+    Description: ARN of the existing S3 website bucket
+    Value: !Sub "arn:aws:s3:::${WebsiteBucketName}"
+
+  CloudFrontDomainName:
+    Description: CloudFront distribution domain name
+    Value: !GetAtt WebsiteDistribution.DomainName
+
+  WebsiteURL:
+    Description: Primary website URL using your custom domain
+    Value: !Sub "https://${DomainName}"
